@@ -1,0 +1,5 @@
+my/
+outputs/
+__pycache__/
+*.log
+audio_temp_file/
