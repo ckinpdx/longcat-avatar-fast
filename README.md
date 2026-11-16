@@ -18,11 +18,11 @@ It's an offline renderer, not a real-time one.
 
 ## Samples
 
-The same image, audio and seed at each step count: 13.3 s of video at 640x608 (4 segments). Click a frame to open the clip with sound.
+The same image, audio and seed at each step count: 13.3 s of video at 640x608 (4 segments). Click a frame to download the clip (with sound).
 
 | 4 steps | 6 steps (default) | 8 steps |
 |---|---|---|
-| [![4 steps](assets/teal_4step.jpg)](assets/teal_4step.mp4) | [![6 steps](assets/teal_6step.jpg)](assets/teal_6step.mp4) | [![8 steps](assets/teal_8step.jpg)](assets/teal_8step.mp4) |
+| [![4 steps](assets/teal_4step.jpg)](https://github.com/ckinpdx/longcat-avatar-fast/raw/main/assets/teal_4step.mp4) | [![6 steps](assets/teal_6step.jpg)](https://github.com/ckinpdx/longcat-avatar-fast/raw/main/assets/teal_6step.mp4) | [![8 steps](assets/teal_8step.jpg)](https://github.com/ckinpdx/longcat-avatar-fast/raw/main/assets/teal_8step.mp4) |
 | **168.8 s** total | **203.6 s** total | **227.1 s** total |
 | 111.2 s generating | 145.0 s generating | 170.0 s generating |
 
