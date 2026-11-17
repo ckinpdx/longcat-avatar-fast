@@ -477,6 +477,10 @@ import run_demo_avatar_single_audio_to_video as demo  # noqa: E402
 #   - ComfyUI's Wan umt5_xxl_fp8_e4m3fn_scaled / fp16: dequantized to bf16, encodes on the CPU
 #   - ours from convert_umt5_convrot.py (INT8 ConvRot, comfy_quant entries): stays INT8 and visits the GPU to encode
 TEXT_ENCODER_FILE = os.environ.get("LONGCAT_TEXT_ENCODER")
+_stock_te = os.path.join(CHECKPOINT_DIR, "..", "LongCat-Video", "text_encoder")
+if not TEXT_ENCODER_FILE and not any(f.endswith((".safetensors", ".bin")) for f in os.listdir(_stock_te)):
+    sys.exit(f"No text encoder weights in {os.path.normpath(_stock_te)}: set LONGCAT_TEXT_ENCODER to a UMT5 file "
+             "(see convert_umt5_convrot.py)")
 if TEXT_ENCODER_FILE:
     from safetensors import safe_open
     from transformers import UMT5Config
