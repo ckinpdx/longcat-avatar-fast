@@ -144,8 +144,10 @@ run_fast.bat --watch my/queue -- --checkpoint_dir=weights/LongCat-Video-Avatar-1
 
   ```
   --model_type=avatar-v1.6 --stage_1=ai2v --resolution=480p --use_distill --use_int8 --compile_dit
-  --mix_steps=<steps/2> --mix_alpha=1.0 --ref_img_index=10 --mask_frame_range=0
+  --mix_steps=<steps/2> --mix_alpha=1.0 --ref_img_index=10 --mask_frame_range=2
   ```
+
+  `--mask_frame_range=2` differs from Meituan's examples, which use 0. LongCat re-inserts your source image into every continuation segment, placed about 1.5 s in. With 0, the frames there can all see it, and the face returns to the source pose once every 3.2 s segment: on a 42 s test, the frames at that point were measurably the closest to the source in every segment. With 2, the frames around that point can't see it. The repetition goes away, while identity, colour and the joins between segments stay the same.
 
   `--use_int8` is what routes their loader to the ConvRot DiT.
 

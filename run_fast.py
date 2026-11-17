@@ -78,7 +78,7 @@ def _value(flag):
 
 
 DEFAULTS = {"--model_type": "avatar-v1.6", "--stage_1": "ai2v", "--resolution": "480p",
-            "--mix_steps": str(STEPS // 2), "--mix_alpha": "1.0", "--ref_img_index": "10", "--mask_frame_range": "0",
+            "--mix_steps": str(STEPS // 2), "--mix_alpha": "1.0", "--ref_img_index": "10", "--mask_frame_range": "2",
             "--output_dir": os.path.join(os.getcwd(), "outputs")}
 for flag, val in DEFAULTS.items():
     if not _given(flag):
