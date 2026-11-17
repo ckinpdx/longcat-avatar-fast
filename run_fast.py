@@ -331,7 +331,45 @@ def _t5_cached(self, *args, **kwargs):
 
 P.LongCatVideoAvatarPipeline._get_t5_prompt_embeds = _t5_cached
 
-# Whisper (5.7 GB fp32) encodes the whole clip's audio once before denoising, then idles. Visit the GPU only for that.
+# Whisper: the pipeline only calls audio_encoder.encoder(...), but their loader builds the whole WhisperModel (decoder
+# included) in fp32, 5.7 GB. Build just the encoder (2.5 GB fp32, same weights, same features) from their checkpoint.
+import longcat_video.audio_process as AP  # noqa: E402
+
+_get_audio_encoder = AP.get_audio_encoder
+
+
+class _WhisperEncoderOnly(torch.nn.Module):
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder
+
+    @property
+    def dtype(self):
+        return next(self.parameters()).dtype
+
+
+def _encoder_only(checkpoint_path, model_type="avatar-v1.0"):
+    if model_type != "avatar-v1.5":
+        return _get_audio_encoder(checkpoint_path, model_type)
+    import glob
+    from safetensors import safe_open
+    from transformers import WhisperConfig
+    from transformers.models.whisper.modeling_whisper import WhisperEncoder
+
+    with torch.device("meta"):   # no random init; the checkpoint fills every tensor
+        encoder = WhisperEncoder(WhisperConfig.from_pretrained(checkpoint_path))
+    prefix = "model.encoder."
+    state = {}
+    for f in glob.glob(os.path.join(checkpoint_path, "*.safetensors")):
+        with safe_open(f, "pt") as h:
+            state.update({k[len(prefix):]: h.get_tensor(k).float() for k in h.keys() if k.startswith(prefix)})
+    encoder.load_state_dict(state, strict=True, assign=True)
+    return _WhisperEncoderOnly(encoder).eval().requires_grad_(False)
+
+
+AP.get_audio_encoder = _encoder_only
+
+# Whisper encodes the whole clip's audio once before denoising, then idles. Visit the GPU only for that.
 _audio = P.LongCatVideoAvatarPipeline.get_audio_embedding
 
 

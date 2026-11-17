@@ -40,7 +40,7 @@ Six steps is the default because it's hard to tell apart from 8: the two clips d
 | **`torch.compile`** | Their `--compile_dit`, made usable: the LoRA closures no longer graph-break, so dynamo stays under its recompile limit. | about 2 s per step |
 | **LightVAE-pro** ([ModelTC/LightVAE](https://github.com/ModelTC/LightVAE), Apache-2.0) | Decodes the Wan2.1 latents instead of the Wan VAE. The launcher re-normalises the latents, because LongCat hands de-normalised ones to the VAE. | 1.5 s vs 3.5 s per segment, 35.9 dB vs the Wan VAE |
 | **Fewer steps** | Picks 6 (or 4) of the 8 trained distillation sigmas, and sets `--mix_steps` to half the step count. | |
-| **32 GB fit** | UMT5 encodes on the CPU, once per prompt. Whisper visits the GPU only to encode the audio. PyTorch's cache is emptied after every DiT step, since Windows has no `expandable_segments`. VRAM is capped (3 GB headroom) so the Windows driver raises out-of-memory instead of silently spilling into system RAM and crawling. | Peak 24.2 GB allocated |
+| **32 GB fit** | UMT5 encodes on the CPU, once per prompt. Whisper is built encoder-only (2.4 GB instead of 5.7 GB; their loader builds the decoder too, in fp32) and visits the GPU only to encode the audio. PyTorch's cache is emptied after every DiT step, since Windows has no `expandable_segments`. VRAM is capped (3 GB headroom) so the Windows driver raises out-of-memory instead of silently spilling into system RAM and crawling. | Peak 24.2 GB allocated |
 | **Windows** | Swaps NCCL for gloo (world size 1). | |
 
 ## Setup
