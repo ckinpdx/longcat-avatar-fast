@@ -16,7 +16,8 @@ Everything after "--" goes to their demo. Defaults for the tested setup are fill
 
 Environment:
   LONGCAT_REPO          their LongCat-Video clone (default: ../LongCat-Video next to this folder)
-  LONGCAT_TEXT_ENCODER  a ComfyUI UMT5 file (e.g. umt5_xxl_fp8_e4m3fn_scaled.safetensors) instead of their 22 GB fp32 one
+  LONGCAT_TEXT_ENCODER  a UMT5 file instead of their 22 GB fp32 one: ours from convert_umt5_convrot.py (INT8, encodes
+                        on the GPU) or ComfyUI's umt5_xxl_fp8_e4m3fn_scaled (encodes on the CPU)
   LONGCAT_STEPS         4, 6 (default) or 8
   LONGCAT_SIGMAS        comma list overriding the sigma pick for LONGCAT_STEPS
   LONGCAT_LIGHTVAE      pro (default), lite, or off (Wan VAE)
@@ -105,6 +106,7 @@ if _json:
 
 import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
+import torch.nn.functional as F  # noqa: E402
 
 # Windows' driver silently spills past VRAM into system RAM and crawls; cap PyTorch so it raises OOM instead.
 _total = torch.cuda.get_device_properties(0).total_memory / 2 ** 30
@@ -318,15 +320,23 @@ _T5_CACHE = {}
 def _t5_cached(self, *args, **kwargs):
     key = repr((args, sorted((k, v) for k, v in kwargs.items() if not isinstance(v, torch.Tensor))))
     if key not in _T5_CACHE:
-        # No room for 11 GB of UMT5 beside the DiT, so encode the prompt on the CPU, once per prompt.
         bound = inspect.signature(_t5).bind(self, *args, **kwargs)
         bound.apply_defaults()
         device = bound.arguments["device"]
-        bound.arguments["device"] = "cpu"
+        on_gpu = getattr(self.text_encoder, "_ck_gpu_encode", False)
+        # The INT8 ConvRot encoder (5.3 GB) visits the GPU beside the DiT. A bf16 one (11 GB) doesn't fit, so it
+        # encodes on the CPU. Either way it runs once per prompt.
+        bound.arguments["device"] = device if on_gpu else "cpu"
         t = time.perf_counter()
+        if on_gpu:
+            self.text_encoder.to(device)
         embeds, mask = _t5(*bound.args, **bound.kwargs)
+        if on_gpu:
+            self.text_encoder.to("cpu")
+            torch.cuda.empty_cache()
         _T5_CACHE[key] = (embeds.to(device), mask.to(device))
-        print(f"[timing] text encoder ran once on CPU: {time.perf_counter() - t:.1f} s", flush=True)
+        print(f"[timing] text encoder ran once on {'GPU' if on_gpu else 'CPU'}: {time.perf_counter() - t:.1f} s",
+              flush=True)
     return _T5_CACHE[key]
 
 
@@ -462,12 +472,27 @@ elif LIGHTVAE != "off":
 
 import run_demo_avatar_single_audio_to_video as demo  # noqa: E402
 
-# UMT5 from a ComfyUI text-encoder file (e.g. Wan's umt5_xxl_fp8_e4m3fn_scaled.safetensors, 6.7 GB) instead of their
-# 22 GB fp32 checkpoint, which takes ~30 s to load. Same google UMT5-XXL; fp8 weights are dequantized to bf16.
+# UMT5 from a ComfyUI text-encoder file instead of their 22 GB fp32 checkpoint, which takes ~30 s to load. Same
+# google UMT5-XXL. Two kinds of file:
+#   - ComfyUI's Wan umt5_xxl_fp8_e4m3fn_scaled / fp16: dequantized to bf16, encodes on the CPU
+#   - ours from convert_umt5_convrot.py (INT8 ConvRot, comfy_quant entries): stays INT8 and visits the GPU to encode
 TEXT_ENCODER_FILE = os.environ.get("LONGCAT_TEXT_ENCODER")
 if TEXT_ENCODER_FILE:
     from safetensors import safe_open
     from transformers import UMT5Config
+    from longcat_convrot import QuantizedLinear
+
+    class _QuantizedEmbedding(torch.nn.Module):
+        """Per-row INT8 embedding: dequantizes only the looked-up rows."""
+
+        def __init__(self, weight, scale, dtype):
+            super().__init__()
+            self.register_buffer("weight", weight)
+            self.register_buffer("weight_scale", scale)
+            self.dtype = dtype
+
+        def forward(self, ids):
+            return (F.embedding(ids, self.weight).to(self.dtype) * F.embedding(ids, self.weight_scale).to(self.dtype))
 
     class _ComfyUMT5:
         @staticmethod
@@ -475,22 +500,46 @@ if TEXT_ENCODER_FILE:
             t = time.perf_counter()
             with torch.device("meta"):
                 model = demo.transformers_UMT5EncoderModel(UMT5Config.from_pretrained(path, subfolder=subfolder))
-            state = {}
             with safe_open(TEXT_ENCODER_FILE, "pt") as f:
-                keys = set(f.keys())
-                for k in keys:
-                    if k.endswith((".scale_weight", ".scale_input")) or k in ("scaled_fp8", "spiece_model"):
-                        continue
-                    w = f.get_tensor(k)
-                    scale = k[: -len("weight")] + "scale_weight"
-                    w = w.float() * f.get_tensor(scale).float() if scale in keys else w
-                    state[k] = w.to(torch_dtype)
-            emb = state.get("shared.weight", state.get("encoder.embed_tokens.weight"))   # tied pair; files carry one
-            state["shared.weight"] = state["encoder.embed_tokens.weight"] = emb
-            model.load_state_dict(state, strict=True, assign=True)
+                raw = {k: f.get_tensor(k) for k in f.keys() if k not in ("scaled_fp8", "spiece_model")}
+            quant = {k[: -len(".comfy_quant")]: json.loads(bytes(raw.pop(k).tolist()).decode())
+                     for k in list(raw) if k.endswith(".comfy_quant")}
+            emb_name = "shared" if "shared.weight" in raw else "encoder.embed_tokens"
+            emb = None
+            for name, conf in quant.items():
+                w, scale = raw.pop(f"{name}.weight"), raw.pop(f"{name}.weight_scale").float()
+                if name == emb_name:
+                    emb = _QuantizedEmbedding(w, scale.reshape(-1, 1), torch_dtype)
+                    continue
+                old = model.get_submodule(name)
+                layer = QuantizedLinear(old.in_features, old.out_features, bias=False,
+                                        group_size=int(conf.get("convrot_groupsize", 256)), device="cpu")
+                layer.weight, layer.weight_scale = w, scale
+                parent, attr = name.rsplit(".", 1)
+                setattr(model.get_submodule(parent), attr, layer)
+            state = {}
+            for k, w in raw.items():
+                if k.endswith((".scale_weight", ".scale_input")):
+                    continue
+                scale = k[: -len("weight")] + "scale_weight"
+                state[k] = (w.float() * raw[scale].float() if scale in raw else w).to(torch_dtype)
+            if emb is None:
+                e = state.get("shared.weight", state.get("encoder.embed_tokens.weight"))   # tied pair; files carry one
+                state["shared.weight"] = state["encoder.embed_tokens.weight"] = e
+            else:
+                model.shared = model.encoder.embed_tokens = emb
+            missing, unexpected = model.load_state_dict(state, strict=False, assign=True)
+            # quantized modules were set directly above, so the state dict doesn't cover them
+            done = set(quant) | ({"shared", "encoder.embed_tokens"} if emb is not None else set())
+            missing = [k for k in missing if k.rsplit(".", 1)[0] not in done]
+            leftovers = [n for n, x in list(model.named_parameters()) + list(model.named_buffers()) if x.is_meta]
+            if missing or unexpected or leftovers:
+                raise RuntimeError(f"text encoder load: missing {missing[:5]} unexpected {unexpected[:5]} "
+                                   f"meta {leftovers[:5]}")
             model.encoder.embed_tokens = model.shared
-            print(f"[timing] text encoder from {os.path.basename(TEXT_ENCODER_FILE)}: {time.perf_counter() - t:.1f} s",
-                  flush=True)
+            model._ck_gpu_encode = bool(quant)   # INT8 kernels are GPU-only
+            print(f"[timing] text encoder from {os.path.basename(TEXT_ENCODER_FILE)}"
+                  f"{' (INT8 ConvRot)' if quant else ''}: {time.perf_counter() - t:.1f} s", flush=True)
             return model.eval().requires_grad_(False)
 
     demo.transformers_UMT5EncoderModel = demo.UMT5EncoderModel

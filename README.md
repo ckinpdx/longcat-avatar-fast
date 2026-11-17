@@ -90,6 +90,22 @@ Tested on Windows 11, an RTX 5090, Python 3.11, torch 2.11 + CUDA 13.0. Linux sh
 
    This writes `base_model_convrot` (15 GB). After that, the bf16 `base_model` (27 GB) can be deleted.
 
+5. **Optional: convert the text encoder too** (7 s). This saves about 30 s per run:
+
+   ```
+   python convert_umt5_convrot.py weights/LongCat-Video/text_encoder umt5_xxl_int8_convrot.safetensors
+   ```
+
+   Then set `LONGCAT_TEXT_ENCODER` to the file. It's the same google UMT5-XXL that Wan uses. Measured on the teal prompt against an fp32 reference:
+
+   | Encoder | Error | Worst token (cosine) |
+   |---|---|---|
+   | bf16 (what their demo runs) | 3.6% | 0.956 |
+   | **INT8 ConvRot (this file)** | **4.1%** | **0.992** |
+   | ComfyUI's Wan `umt5_xxl_fp8_e4m3fn_scaled` | 8.3% | 0.723 |
+
+   The teal sample rendered with it is 42.5 dB from the stock-encoder render. The file is in ComfyUI's quantized format with the tokenizer embedded, and ComfyUI's CLIPLoader (type `wan`) loads it, but ComfyUI currently gets 10.1% error from it, worse than its own fp8 file. Don't use it for Wan in ComfyUI yet.
+
 ## Run
 
 Write an input JSON. Relative paths in it are read relative to the JSON file:
@@ -133,7 +149,7 @@ run_fast.bat -- --checkpoint_dir=weights/LongCat-Video-Avatar-1.6 --input_json=m
 | `LONGCAT_SAGE`, `LONGCAT_CONVROT`, `LONGCAT_FAST_LORA` | `1` | `0` turns one optimisation off for A/B runs |
 | `LONGCAT_PROFILE_CALL` | `0` | `N` profiles DiT call N and prints where its GPU time went |
 | `LONGCAT_REPO` | `../LongCat-Video` | Their repo |
-| `LONGCAT_TEXT_ENCODER` | | A ComfyUI UMT5 file to use instead of their 22 GB fp32 text encoder, e.g. Wan's `umt5_xxl_fp8_e4m3fn_scaled.safetensors`. Loads in 3.4 s instead of 30.6 s. On the teal sample, the output is 42.4 dB PSNR from the stock encoder's. |
+| `LONGCAT_TEXT_ENCODER` | | A UMT5 file to use instead of their 22 GB fp32 text encoder (30.6 s to load). Our INT8 ConvRot one (`convert_umt5_convrot.py`, 5.3 GB) visits the GPU and encodes in 3 s. ComfyUI's Wan `umt5_xxl_fp8_e4m3fn_scaled` also works and encodes on the CPU. |
 
 `tools/` has the micro-benchmarks behind the numbers above (attention, linears) and a check of the fused LoRA add against their formula.
 
@@ -141,7 +157,7 @@ run_fast.bat -- --checkpoint_dir=weights/LongCat-Video-Avatar-1.6 --input_json=m
 
 - Only their single-audio demo (`run_demo_avatar_single_audio_to_video.py`) is wired up.
 - The first segment compiles for its shape (~25 s). The first continuation recompiles once for the continuation shape; after that, segments run warm.
-- Each run reloads everything: ~57 s, or ~31 s with `LONGCAT_TEXT_ENCODER`. Rendering many clips from one process would save that, but this launcher doesn't do it.
+- Each run reloads everything: ~57 s, or ~25 s with the ConvRot text encoder. Rendering many clips from one process would save that, but this launcher doesn't do it.
 
 ## Licence
 
