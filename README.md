@@ -124,6 +124,15 @@ Then run it:
 run_fast.bat -- --checkpoint_dir=weights/LongCat-Video-Avatar-1.6 --input_json=my/talk.json --num_segments=4
 ```
 
+**Several clips, one process.** Models load and compile once, so every clip after the first skips ~40 s of startup and warm-up. A 1-segment teal clip took 77.3 s on its own and 35.1 s as the second job, with bit-identical output.
+
+- Repeat `--input_json`; each clip goes to `<output_dir>/<json name>/`. A JSON can set its own `"num_segments"`.
+- Or start it once with `--watch <folder>` before the `--`. It renders every JSON dropped into that folder, then moves the JSON to `done/` (or `failed/`). Ctrl+C stops.
+
+```
+run_fast.bat --watch my/queue -- --checkpoint_dir=weights/LongCat-Video-Avatar-1.6 --num_segments=4
+```
+
 `run_fast.bat` loads the MSVC environment that `torch.compile` needs on Windows and runs the `python` on your PATH (or `LONGCAT_PYTHON`). On Linux, or with `LONGCAT_COMPILE=0`, run `python run_fast.py -- ...` directly.
 
 - **Segments:** the first segment is 93 frames (3.7 s at 25 fps); each `--num_segments` beyond 1 adds 80 frames (3.2 s). Size the audio to match.
@@ -157,7 +166,7 @@ run_fast.bat -- --checkpoint_dir=weights/LongCat-Video-Avatar-1.6 --input_json=m
 
 - Only their single-audio demo (`run_demo_avatar_single_audio_to_video.py`) is wired up.
 - The first segment compiles for its shape (~25 s). The first continuation recompiles once for the continuation shape; after that, segments run warm.
-- Each run reloads everything: ~57 s, or ~25 s with the ConvRot text encoder. Rendering many clips from one process would save that, but this launcher doesn't do it.
+- A fresh process spends ~25 s loading (with the ConvRot text encoder) plus ~20 s compiling and warming up; batch and watch mode pay that once. Rendering many clips from one process would save that, but this launcher doesn't do it.
 
 ## Licence
 

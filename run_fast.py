@@ -6,13 +6,23 @@ What it changes, all from outside their code:
   - fused LoRA add for the DMD/OPSD LoRA side path
   - 6 distilled steps by default (LONGCAT_STEPS=4|6|8; 8 is their schedule)
   - LightVAE-pro decoder instead of the Wan VAE decoder
-  - fits a 32 GB card: UMT5 encodes on the CPU, Whisper visits the GPU only to encode, VRAM is capped so the
+  - fits a 32 GB card: the text encoder and Whisper visit the GPU only to encode, VRAM is capped so the
     Windows driver raises OOM instead of silently spilling into system RAM
   - gloo instead of NCCL, so it runs on Windows
 
 Everything after "--" goes to their demo. Defaults for the tested setup are filled in for flags you leave out.
 
     python run_fast.py -- --checkpoint_dir=D:/weights/LongCat-Video-Avatar-1.6 --input_json=my/talk.json --num_segments=4
+
+Several clips in one process (models load and compile once): repeat --input_json. Each clip goes to
+<output_dir>/<json name>/. A JSON can carry its own "num_segments".
+
+    python run_fast.py -- --checkpoint_dir=... --input_json=a.json --input_json=b.json
+
+Watch a folder and render each JSON dropped into it, keeping the models warm; finished JSONs move to <dir>/done
+(or <dir>/failed). Ctrl+C stops.
+
+    python run_fast.py --watch my/queue -- --checkpoint_dir=...
 
 Environment:
   LONGCAT_REPO          their LongCat-Video clone (default: ../LongCat-Video next to this folder)
@@ -79,20 +89,36 @@ for flag in ("--use_distill", "--use_int8"):   # --use_int8 is what routes their
 if os.environ.get("LONGCAT_COMPILE", "1") == "1" and "--compile_dit" not in DEMO_ARGS:
     DEMO_ARGS.append("--compile_dit")
 
-for flag in ("--checkpoint_dir", "--output_dir", "--input_json"):
+# Every --input_json is a job; the demo gets one at a time.
+JOBS = []
+while True:
+    val, i, joined = _value("--input_json")
+    if val is None:
+        break
+    JOBS.append(os.path.abspath(val))
+    del DEMO_ARGS[i - (0 if joined else 1): i + 1]
+LAUNCHER_ARGS = sys.argv[1:sys.argv.index("--")]
+WATCH = (os.path.abspath(LAUNCHER_ARGS[LAUNCHER_ARGS.index("--watch") + 1])
+         if "--watch" in LAUNCHER_ARGS else None)
+if not JOBS and not WATCH:
+    sys.exit("pass --input_json=<case.json> (repeatable), or --watch <folder> before the --")
+
+for flag in ("--checkpoint_dir", "--output_dir"):
     val, i, joined = _value(flag)
     if val is not None:
         DEMO_ARGS[i] = (f"{flag}={os.path.abspath(val)}" if joined else os.path.abspath(val))
 CHECKPOINT_DIR, _, _ = _value("--checkpoint_dir")
 if CHECKPOINT_DIR is None:
     sys.exit("pass --checkpoint_dir=<your LongCat-Video-Avatar-1.6 folder>")
+OUTPUT_DIR, _, _ = _value("--output_dir")
 
-# Paths inside the input JSON are relative to the JSON file; their demo would read them relative to its own repo.
-_json, _ji, _jj = _value("--input_json")
-if _json:
-    with open(_json, encoding="utf-8") as f:
+
+def prepare_job(json_path):
+    """Their demo reads the case's paths relative to its own repo; rewrite them relative to the JSON file. Returns
+    (temp JSON path, segment count override or None)."""
+    with open(json_path, encoding="utf-8") as f:
         case = json.load(f)
-    base = os.path.dirname(_json)
+    base = os.path.dirname(json_path)
     absolute = lambda p: p if os.path.isabs(p) else os.path.normpath(os.path.join(base, p))   # noqa: E731
     if "cond_image" in case:
         case["cond_image"] = absolute(case["cond_image"])
@@ -100,9 +126,8 @@ if _json:
     tmp = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
     json.dump(case, tmp)
     tmp.close()
-    import atexit
-    atexit.register(os.remove, tmp.name)
-    DEMO_ARGS[_ji] = f"--input_json={tmp.name}" if _jj else tmp.name
+    return tmp.name, case.get("num_segments")
+
 
 import torch  # noqa: E402
 import torch.distributed as dist  # noqa: E402
@@ -196,6 +221,9 @@ def _to_keep_te_on_cpu(self, device):
             size = sum(t.numel() * t.element_size() for t in list(m.parameters()) + list(m.buffers()))
             print(f"[timing]   {name}: {size / gb:.1f} GB", flush=True)
 
+    if getattr(self.dit, "_ck_hooked", False):   # batch mode: the same DiT comes back for every job
+        return out
+    self.dit._ck_hooked = True
     calls = {"n": 0}
     prof_call = int(os.environ.get("LONGCAT_PROFILE_CALL", "0"))   # profile this DiT call (1-based); 0 = off
 
@@ -549,8 +577,95 @@ if TEXT_ENCODER_FILE:
     demo.transformers_UMT5EncoderModel = demo.UMT5EncoderModel
     demo.UMT5EncoderModel = _ComfyUMT5
 
-sys.argv = [demo.__file__] + DEMO_ARGS
-print("[timing] demo args:", " ".join(DEMO_ARGS), flush=True)
+# ---- batch / watch: load and compile once ----
+# Their generate() builds every model from scratch. Cache the loaders so later jobs reuse the first job's models,
+# and make the steps that must not repeat (process group, context-parallel mesh, LoRA load, compile) idempotent.
+import types  # noqa: E402
+
+
+def _once(fn):
+    cache = {}
+
+    def cached(*args, **kwargs):
+        key = repr((args, sorted(kwargs.items())))
+        if key not in cache:
+            cache[key] = fn(*args, **kwargs)
+        return cache[key]
+    return cached
+
+
+for _name in ("AutoTokenizer", "UMT5EncoderModel", "AutoencoderKLWan"):
+    demo.__dict__[_name] = types.SimpleNamespace(from_pretrained=_once(getattr(demo, _name).from_pretrained))
+for _name in ("load_quantized_dit", "get_audio_encoder", "get_audio_feature_extractor"):
+    demo.__dict__[_name] = _once(getattr(demo, _name))
+_init_gloo = dist.init_process_group
+dist.init_process_group = lambda *a, **k: None if dist.is_initialized() else _init_gloo(*a, **k)
+_init_cp = demo.context_parallel_util.init_context_parallel
+_CP_DONE = []
+
+
+def _init_cp_once(*a, **k):
+    if not _CP_DONE:
+        _init_cp(*a, **k)
+        _CP_DONE.append(True)
+
+
+demo.context_parallel_util.init_context_parallel = _init_cp_once
+_load_lora = DA.LongCatVideoAvatarTransformer3DModel.load_lora
+
+
+def _load_lora_once(self, lora_path, lora_key, *a, **k):
+    if lora_key not in self.lora_dict:   # a second load would stack the LoRA on itself
+        return _load_lora(self, lora_path, lora_key, *a, **k)
+
+
+DA.LongCatVideoAvatarTransformer3DModel.load_lora = _load_lora_once
+_compile = torch.compile
+torch.compile = lambda model=None, **k: model if isinstance(model, torch._dynamo.eval_frame.OptimizedModule)     else _compile(model, **k)
+
+
+def run_job(json_path):
+    tmp, segments = prepare_job(json_path)
+    args = list(DEMO_ARGS) + [f"--input_json={tmp}"]
+    if segments is not None:
+        args = [a for a in args if not a.startswith("--num_segments")] + [f"--num_segments={int(segments)}"]
+    if WATCH or len(JOBS) > 1:
+        out = os.path.join(OUTPUT_DIR, os.path.splitext(os.path.basename(json_path))[0])
+        args = [a for a in args if not a.startswith("--output_dir")] + [f"--output_dir={out}"]
+    sys.argv = [demo.__file__] + args
+    print(f"[timing] job {os.path.basename(json_path)}; demo args: {' '.join(args)}", flush=True)
+    t = time.perf_counter()
+    try:
+        demo.generate(demo._parse_args())
+    finally:
+        os.remove(tmp)
+    print(f"[timing] job {os.path.basename(json_path)} total {time.perf_counter() - t:.1f} s", flush=True)
+
+
 t0 = time.perf_counter()
-demo.generate(demo._parse_args())
+for job in JOBS:
+    run_job(job)
+if WATCH:
+    import shutil
+    import traceback
+    for sub in ("done", "failed"):
+        os.makedirs(os.path.join(WATCH, sub), exist_ok=True)
+    print(f"[watch] watching {WATCH} for *.json (Ctrl+C stops)", flush=True)
+    try:
+        while True:
+            pending = sorted((os.path.join(WATCH, f) for f in os.listdir(WATCH) if f.lower().endswith(".json")),
+                             key=os.path.getmtime)
+            if not pending:
+                time.sleep(2)
+                continue
+            job = pending[0]
+            try:
+                run_job(job)
+                dest = "done"
+            except Exception:
+                traceback.print_exc()
+                dest = "failed"
+            shutil.move(job, os.path.join(WATCH, dest, os.path.basename(job)))
+    except KeyboardInterrupt:
+        pass
 print("[timing] total", round(time.perf_counter() - t0, 1), "s", flush=True)
