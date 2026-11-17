@@ -133,6 +133,7 @@ run_fast.bat -- --checkpoint_dir=weights/LongCat-Video-Avatar-1.6 --input_json=m
 | `LONGCAT_SAGE`, `LONGCAT_CONVROT`, `LONGCAT_FAST_LORA` | `1` | `0` turns one optimisation off for A/B runs |
 | `LONGCAT_PROFILE_CALL` | `0` | `N` profiles DiT call N and prints where its GPU time went |
 | `LONGCAT_REPO` | `../LongCat-Video` | Their repo |
+| `LONGCAT_TEXT_ENCODER` | | A ComfyUI UMT5 file to use instead of their 22 GB fp32 text encoder, e.g. Wan's `umt5_xxl_fp8_e4m3fn_scaled.safetensors`. Loads in 3.4 s instead of 30.6 s. On the teal sample, the output is 42.4 dB PSNR from the stock encoder's. |
 
 `tools/` has the micro-benchmarks behind the numbers above (attention, linears) and a check of the fused LoRA add against their formula.
 
@@ -140,7 +141,7 @@ run_fast.bat -- --checkpoint_dir=weights/LongCat-Video-Avatar-1.6 --input_json=m
 
 - Only their single-audio demo (`run_demo_avatar_single_audio_to_video.py`) is wired up.
 - The first segment compiles for its shape (~25 s). The first continuation recompiles once for the continuation shape; after that, segments run warm.
-- Each run reloads everything (~57 s). Rendering many clips from one process would save that, but this launcher doesn't do it.
+- Each run reloads everything: ~57 s, or ~31 s with `LONGCAT_TEXT_ENCODER`. Rendering many clips from one process would save that, but this launcher doesn't do it.
 
 ## Licence
 

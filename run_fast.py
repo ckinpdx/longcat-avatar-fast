@@ -16,6 +16,7 @@ Everything after "--" goes to their demo. Defaults for the tested setup are fill
 
 Environment:
   LONGCAT_REPO          their LongCat-Video clone (default: ../LongCat-Video next to this folder)
+  LONGCAT_TEXT_ENCODER  a ComfyUI UMT5 file (e.g. umt5_xxl_fp8_e4m3fn_scaled.safetensors) instead of their 22 GB fp32 one
   LONGCAT_STEPS         4, 6 (default) or 8
   LONGCAT_SIGMAS        comma list overriding the sigma pick for LONGCAT_STEPS
   LONGCAT_LIGHTVAE      pro (default), lite, or off (Wan VAE)
@@ -460,6 +461,40 @@ elif LIGHTVAE != "off":
     sys.exit(f"LONGCAT_LIGHTVAE={LIGHTVAE}: use pro, lite or off")
 
 import run_demo_avatar_single_audio_to_video as demo  # noqa: E402
+
+# UMT5 from a ComfyUI text-encoder file (e.g. Wan's umt5_xxl_fp8_e4m3fn_scaled.safetensors, 6.7 GB) instead of their
+# 22 GB fp32 checkpoint, which takes ~30 s to load. Same google UMT5-XXL; fp8 weights are dequantized to bf16.
+TEXT_ENCODER_FILE = os.environ.get("LONGCAT_TEXT_ENCODER")
+if TEXT_ENCODER_FILE:
+    from safetensors import safe_open
+    from transformers import UMT5Config
+
+    class _ComfyUMT5:
+        @staticmethod
+        def from_pretrained(path, subfolder=None, torch_dtype=torch.bfloat16, **kwargs):
+            t = time.perf_counter()
+            with torch.device("meta"):
+                model = demo.transformers_UMT5EncoderModel(UMT5Config.from_pretrained(path, subfolder=subfolder))
+            state = {}
+            with safe_open(TEXT_ENCODER_FILE, "pt") as f:
+                keys = set(f.keys())
+                for k in keys:
+                    if k.endswith((".scale_weight", ".scale_input")) or k in ("scaled_fp8", "spiece_model"):
+                        continue
+                    w = f.get_tensor(k)
+                    scale = k[: -len("weight")] + "scale_weight"
+                    w = w.float() * f.get_tensor(scale).float() if scale in keys else w
+                    state[k] = w.to(torch_dtype)
+            emb = state.get("shared.weight", state.get("encoder.embed_tokens.weight"))   # tied pair; files carry one
+            state["shared.weight"] = state["encoder.embed_tokens.weight"] = emb
+            model.load_state_dict(state, strict=True, assign=True)
+            model.encoder.embed_tokens = model.shared
+            print(f"[timing] text encoder from {os.path.basename(TEXT_ENCODER_FILE)}: {time.perf_counter() - t:.1f} s",
+                  flush=True)
+            return model.eval().requires_grad_(False)
+
+    demo.transformers_UMT5EncoderModel = demo.UMT5EncoderModel
+    demo.UMT5EncoderModel = _ComfyUMT5
 
 sys.argv = [demo.__file__] + DEMO_ARGS
 print("[timing] demo args:", " ".join(DEMO_ARGS), flush=True)
