@@ -624,8 +624,30 @@ _compile = torch.compile
 torch.compile = lambda model=None, **k: model if isinstance(model, torch._dynamo.eval_frame.OptimizedModule)     else _compile(model, **k)
 
 
+# Experimental: how continuation segments get their 13-frame context. 1.5/1.6 decode the previous segment and
+# re-encode its last 13 frames with the Wan VAE (use_vcond False); v1.0 passed the previous latents straight through
+# (use_vcond True). A job JSON can set "use_vcond" to try the other way; LONGCAT_VCOND=0|1 sets it for every job.
+VCOND = {"value": None}
+_pipe_init = P.LongCatVideoAvatarPipeline.__init__
+
+
+def _pipe_init_vcond(self, *args, **kwargs):
+    _pipe_init(self, *args, **kwargs)
+    if VCOND["value"] is not None:
+        self.use_vcond = VCOND["value"]
+        print(f"[timing] continuation context: {'previous latents' if self.use_vcond else 're-encoded frames'}",
+              flush=True)
+
+
+P.LongCatVideoAvatarPipeline.__init__ = _pipe_init_vcond
+
+
 def run_job(json_path):
     tmp, segments = prepare_job(json_path)
+    with open(json_path, encoding="utf-8") as f:
+        job_vcond = json.load(f).get("use_vcond")
+    env_vcond = os.environ.get("LONGCAT_VCOND")
+    VCOND["value"] = bool(job_vcond) if job_vcond is not None else (env_vcond == "1" if env_vcond else None)
     args = list(DEMO_ARGS) + [f"--input_json={tmp}"]
     if segments is not None:
         args = [a for a in args if not a.startswith("--num_segments")] + [f"--num_segments={int(segments)}"]

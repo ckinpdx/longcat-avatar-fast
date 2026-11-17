@@ -161,6 +161,7 @@ run_fast.bat --watch my/queue -- --checkpoint_dir=weights/LongCat-Video-Avatar-1
 | `LONGCAT_SAGE`, `LONGCAT_CONVROT`, `LONGCAT_FAST_LORA` | `1` | `0` turns one optimisation off for A/B runs |
 | `LONGCAT_PROFILE_CALL` | `0` | `N` profiles DiT call N and prints where its GPU time went |
 | `LONGCAT_REPO` | `../LongCat-Video` | Their repo |
+| `LONGCAT_VCOND` | | Experimental. `1` passes the previous segment's latents straight in as continuation context instead of decoding and re-encoding its last 13 frames, which is what 1.5/1.6 do. A job JSON can set `"use_vcond"`. On one 42 s teal test it was 10% faster, stayed sharper, and showed no colour drift. |
 | `LONGCAT_TEXT_ENCODER` | | A UMT5 file to use instead of their 22 GB fp32 text encoder (30.6 s to load). Our INT8 ConvRot one (`convert_umt5_convrot.py`, 5.3 GB) visits the GPU and encodes in 3 s. ComfyUI's Wan `umt5_xxl_fp8_e4m3fn_scaled` also works and encodes on the CPU. |
 
 `tools/` has the micro-benchmarks behind the numbers above (attention, linears) and a check of the fused LoRA add against their formula.
