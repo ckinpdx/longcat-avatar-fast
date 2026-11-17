@@ -6,7 +6,7 @@ The source is a Hugging Face UMT5 folder (LongCat ships google/umt5-xxl in fp32)
 - The 168 attention and FFN Linears become int8_tensorwise with ConvRot (group 256) and per-row scales. They run on
   comfy-kitchen's INT8 kernels.
 - The 256k-token embedding becomes per-row INT8 (no rotation); lookups dequantize the selected rows.
-- Layer norms and the relative attention biases stay in bf16.
+- Layer norms and the relative attention biases stay in fp32.
 - spiece_model (the SentencePiece tokenizer as bytes) is embedded the way ComfyUI's Wan UMT5 files carry it, so the
   file also loads in ComfyUI's CLIPLoader (type wan). ComfyUI currently runs it less accurately than run_fast.py does.
 
@@ -71,7 +71,9 @@ for path in files:
                 out["shared.comfy_quant"] = torch.tensor(list(json.dumps({"format": "int8_tensorwise"}).encode()),
                                                          dtype=torch.uint8)
             else:
-                out[key] = t.to(torch.bfloat16).contiguous()
+                # fp32, not bf16: ComfyUI takes its compute dtype from the unquantized tensors (bf16 here made it
+                # run the whole encoder in bf16), and two layer-norm weights are too small for fp16
+                out[key] = t.float().contiguous()
     print(f"[convert] {os.path.basename(path)}: {n_lin} linears so far, {time.perf_counter() - t0:.0f} s", flush=True)
 
 if os.path.isfile(spiece):

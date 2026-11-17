@@ -96,15 +96,18 @@ Tested on Windows 11, an RTX 5090, Python 3.11, torch 2.11 + CUDA 13.0. Linux sh
    python convert_umt5_convrot.py weights/LongCat-Video/text_encoder umt5_xxl_int8_convrot.safetensors
    ```
 
-   Then set `LONGCAT_TEXT_ENCODER` to the file. It's the same google UMT5-XXL that Wan uses. Measured on the teal prompt against an fp32 reference:
+   Then set `LONGCAT_TEXT_ENCODER` to the file. It's the same google UMT5-XXL that Wan uses. Measured on one prompt (teal) against an fp32 reference:
 
-   | Encoder | Error | Worst token (cosine) |
-   |---|---|---|
-   | bf16 (what their demo runs) | 3.6% | 0.956 |
-   | **INT8 ConvRot (this file)** | **4.1%** | **0.992** |
-   | ComfyUI's Wan `umt5_xxl_fp8_e4m3fn_scaled` | 8.3% | 0.723 |
+   | Encoder | Error | Worst token (cosine) | Other tokens (mean cosine) |
+   |---|---|---|---|
+   | bf16 (what their demo runs) | 3.6% | 0.956 | 0.9997 |
+   | **INT8 ConvRot (this file), in run_fast** | **4.1%** | **0.992** | |
+   | ComfyUI's Wan `umt5_xxl_fp8_e4m3fn_scaled`, in run_fast | 8.3% | 0.723 | |
+   | INT8 ConvRot (this file), in ComfyUI | 8.9% | 0.762 | 0.9996 |
 
-   The teal sample rendered with it is 42.5 dB from the stock-encoder render. The file is in ComfyUI's quantized format with the tokenizer embedded, and ComfyUI's CLIPLoader (type `wan`) loads it, but ComfyUI currently gets 10.1% error from it, worse than its own fp8 file. Don't use it for Wan in ComfyUI yet.
+   UMT5 is sensitive in blocks 16–19, where its very large activations build up. Small arithmetic changes there can throw single tokens off, and the overall error figure is dominated by those tokens. Even the stock bf16 encoder drops "and" to 0.956. One prompt can't rank these encoders; a fair comparison needs more prompts. The teal sample rendered with this file is 42.5 dB from the stock-encoder render.
+
+   The file is in ComfyUI's quantized format with the tokenizer embedded, and ComfyUI's CLIPLoader (type `wan`) loads it. The unquantized tensors are stored in fp32 because ComfyUI picks its compute dtype from them. It hasn't been tried in a Wan video yet.
 
 ## Run
 
